@@ -1,144 +1,138 @@
-"""内置示例：温度扩范围、质控码缺省。供网页一键填入编辑器。"""
+"""内置示例：离线归档包录入与双字段联合筛查。供网页一键填入。
 
-TEMP_FW_V1 = {
-    "type": "object",
-    "properties": {
-        "temp": {"type": "integer", "minimum": -10, "maximum": 50},
-        "site": {"type": "string", "enum": ["WQ-01", "WQ-02"]},
-    },
-    "required": ["temp", "site"],
-    "additionalProperties": False,
+场景字段：
+- qc   质控码，枚举 ["N", "Q"]（另有隐式状态 missing 缺省 / null 显式空值）
+- mode 工况，枚举 ["routine", "storm"]（同上）
+"""
+
+# ---------------- 枚举字段定义 ----------------
+
+FIELDS_QC_MODE = [
+    {"field_key": "qc", "label": "质控码", "values": ["N", "Q"]},
+    {"field_key": "mode", "label": "工况", "values": ["routine", "storm"]},
+]
+
+# ---------------- 固件契约 ----------------
+
+def _flat(props, required):
+    return {"type": "object", "properties": props,
+            "required": required, "additionalProperties": False}
+
+
+# v1：qc 必填且只认 N/Q；mode 必填，只认 routine/storm
+SEG_V1 = _flat(
+    {"qc": {"enum": ["N", "Q"]},
+     "mode": {"enum": ["routine", "storm"]},
+     "temp": {"type": "integer", "minimum": -40, "maximum": 100}},
+    ["qc", "mode", "temp"])
+
+# v2：qc 可缺省、可取 null；mode 仍必填
+SEG_V2 = _flat(
+    {"qc": {"enum": ["N", "Q", None]},
+     "mode": {"enum": ["routine", "storm"]},
+     "temp": {"type": "integer", "minimum": -40, "maximum": 100}},
+    ["mode", "temp"])
+
+# v3：顶层 anyOf —— 常规报文（qc+mode）或风暴报文（mode=storm，无 qc）
+SEG_V3_ANYOF = {"anyOf": [
+    _flat({"qc": {"enum": ["N", "Q", None]},
+           "mode": {"enum": ["routine", "storm"]},
+           "temp": {"type": "integer", "minimum": -40, "maximum": 100}},
+          ["mode", "temp"]),
+    _flat({"mode": {"enum": ["storm"]},
+           "level": {"type": "integer", "enum": [0, 1, 2, 3]}},
+          ["mode", "level"]),
+]}
+
+# 旧固件：mode 只认 routine —— 不可能产生 storm 报文
+SEG_OLD = _flat(
+    {"qc": {"enum": ["N", "Q"]},
+     "mode": {"enum": ["routine"]},
+     "temp": {"type": "integer", "minimum": -10, "maximum": 50}},
+    ["qc", "mode", "temp"])
+
+
+def _counts(qc_part, mode_part):
+    return {"qc": qc_part, "mode": mode_part}
+
+
+# ---------------- 示例包 ----------------
+
+# 包 A：两段（v1+v2），共 6 条；查 qc 缺省 × storm 时仅 v2 可能命中
+PACKAGE_A = {
+    "package_no": "PKG-A",
+    "note": "新旧固件混装：v1 的 qc 必填，v2 允许缺省/null",
+    "counts": _counts(
+        {"missing": 2, "null": 1, 'value:"N"': 2, 'value:"Q"': 1},
+        {'value:"routine"': 4, 'value:"storm"': 2}),
+    "segments": [
+        {"segment": "v1", "message_count": 3, "schema": SEG_V1},
+        {"segment": "v2", "message_count": 3, "schema": SEG_V2},
+    ],
 }
 
-TEMP_FW_V2 = {
-    "type": "object",
-    "properties": {
-        "temp": {"type": "integer", "minimum": -40, "maximum": 100},
-        "site": {"type": "string", "enum": ["WQ-01", "WQ-02"]},
-    },
-    "required": ["temp", "site"],
-    "additionalProperties": False,
+# 包 B：含 anyOf 段，共 5 条；v3 的 storm 分支可无 qc
+PACKAGE_B = {
+    "package_no": "PKG-B",
+    "note": "v3 顶层 anyOf：风暴报文分支允许 qc 缺省",
+    "counts": _counts(
+        {"missing": 2, "null": 0, 'value:"N"': 2, 'value:"Q"': 1},
+        {'value:"routine"': 2, 'value:"storm"': 3}),
+    "segments": [
+        {"segment": "v2", "message_count": 2, "schema": SEG_V2},
+        {"segment": "v3", "message_count": 3, "schema": SEG_V3_ANYOF},
+    ],
 }
 
-TEMP_PROG_OLD = {
-    "type": "object",
-    "properties": {
-        "temp": {"type": "integer", "minimum": -10, "maximum": 50},
-        "site": {"type": "string", "enum": ["WQ-01", "WQ-02"]},
-    },
-    "required": ["temp", "site"],
-    "additionalProperties": False,
+# 包 C：旧固件只认 routine，摘要却登记 2 条 storm —— 摘要与契约矛盾，应待核
+PACKAGE_C_CONFLICT = {
+    "package_no": "PKG-C",
+    "note": "摘要登记 storm=2，但唯一段契约的 mode 枚举只有 routine",
+    "counts": _counts(
+        {"missing": 0, "null": 0, 'value:"N"': 3, 'value:"Q"': 1},
+        {'value:"routine"': 2, 'value:"storm"': 2}),
+    "segments": [
+        {"segment": "v0", "message_count": 4, "schema": SEG_OLD},
+    ],
 }
 
-TEMP_PROG_NEW = {
-    "type": "object",
-    "properties": {
-        "temp": {"type": "integer", "minimum": -40, "maximum": 100},
-        "site": {"type": "string", "enum": ["WQ-01", "WQ-02"]},
-    },
-    "required": ["temp", "site"],
-    "additionalProperties": False,
-}
-
-QC_FW = {
-    "type": "object",
-    "properties": {
-        "temp": {"type": "integer", "minimum": -40, "maximum": 100},
-        "site": {"type": "string", "enum": ["WQ-01", "WQ-02"]},
-        "qc": {"enum": ["N", "Q", None]},
-    },
-    "required": ["temp", "site"],
-    "additionalProperties": False,
-}
-
-QC_PROG_REQUIRE = {
-    "type": "object",
-    "properties": {
-        "temp": {"type": "integer", "minimum": -40, "maximum": 100},
-        "site": {"type": "string", "enum": ["WQ-01", "WQ-02"]},
-        "qc": {"enum": ["N", "Q"]},
-    },
-    "required": ["temp", "site", "qc"],
-    "additionalProperties": False,
-}
-
-QC_PROG_OPTIONAL = {
-    "type": "object",
-    "properties": {
-        "temp": {"type": "integer", "minimum": -40, "maximum": 100},
-        "site": {"type": "string", "enum": ["WQ-01", "WQ-02"]},
-        "qc": {"enum": ["N", "Q", None]},
-    },
-    "required": ["temp", "site"],
-    "additionalProperties": False,
-}
-
-ANYOF_PROG = {
-    "anyOf": [
-        {
-            "type": "object",
-            "properties": {
-                "temp": {"type": "integer", "minimum": -40, "maximum": 100},
-                "site": {"type": "string", "enum": ["WQ-01", "WQ-02"]},
-                "qc": {"enum": ["N", "Q", None]},
-            },
-            "required": ["temp", "site"],
-            "additionalProperties": False,
-        },
-        {
-            "type": "object",
-            "properties": {
-                "level": {"type": "integer", "enum": [0, 1, 2, 3]},
-                "site": {"type": "string", "enum": ["WQ-01", "WQ-02"]},
-            },
-            "required": ["level", "site"],
-            "additionalProperties": False,
-        },
-    ]
+# 包 D：单段 v1，qc/mode 均必填 —— 查 qc 缺省 × storm 时所有段不可能命中，可跳过
+PACKAGE_D_SKIP = {
+    "package_no": "PKG-D",
+    "note": "单段 v1：qc、mode 均必填且无 null，缺省报文不存在",
+    "counts": _counts(
+        {"missing": 0, "null": 0, 'value:"N"': 3, 'value:"Q"': 1},
+        {'value:"routine"': 3, 'value:"storm"': 1}),
+    "segments": [
+        {"segment": "v1", "message_count": 4, "schema": SEG_V1},
+    ],
 }
 
 EXAMPLES = [
     {
-        "title": "示例一：温度扩范围",
-        "story": ("固件 v2 把温度量程从 -10~50℃ 扩到 -40~100℃。若直接发布固件 v2，"
-                  "旧程序（只认 -10~50℃）会拒收，系统给出反例报文（如 temp=-40）；"
-                  "应先把程序升级为 -40~100℃，再发布固件 v2。"),
-        "steps": ["发布固件 v1（-10~50℃）", "发布程序 analyzer 旧版（-10~50℃）",
-                  "直接发布固件 v2（-40~100℃）→ 被拒并给出反例",
-                  "把 analyzer 替换为新版（-40~100℃）→ 通过",
-                  "再次发布固件 v2 → 通过"],
-        "snippets": [
-            {"label": "固件 v1：temp -10~50℃", "target": "firmware", "doc": TEMP_FW_V1},
-            {"label": "固件 v2：temp -40~100℃", "target": "firmware", "doc": TEMP_FW_V2},
-            {"label": "程序 analyzer 旧版：-10~50℃", "target": "program",
-             "program_id": "analyzer", "doc": TEMP_PROG_OLD},
-            {"label": "程序 analyzer 新版：-40~100℃", "target": "program",
-             "program_id": "analyzer", "doc": TEMP_PROG_NEW},
-        ],
+        "title": "示例一：新旧固件混装（PKG-A）",
+        "story": ("包内 v1 固件 qc 必填、v2 固件允许 qc 缺省或显式 null。"
+                  "选择「qc=缺省 × mode=storm」筛查时，v1 被证明不可能命中，"
+                  "v2 可能命中，整包须保留并定位到 v2 段。"),
+        "doc": PACKAGE_A,
     },
     {
-        "title": "示例二：质控码缺省",
-        "story": ("新固件在质控码不可得时缺省 qc 字段（或写 null）。若程序把 qc 列为 "
-                  "required 且不允许 null，缺省报文会被拒收，反例为不含 qc（或 qc=null）的报文；"
-                  "程序需把 qc 改为可选并允许 null。"),
-        "steps": ["发布固件：qc 可选、可取 null", "发布程序 strict-qc：qc 必填 → 被拒并给出反例",
-                  "把 strict-qc 替换为 qc 可选版本 → 通过"],
-        "snippets": [
-            {"label": "固件：qc 可缺省/为 null", "target": "firmware", "doc": QC_FW},
-            {"label": "程序 strict-qc：qc 必填（会被拒）", "target": "program",
-             "program_id": "strict-qc", "doc": QC_PROG_REQUIRE},
-            {"label": "程序 strict-qc：qc 可选（兼容）", "target": "program",
-             "program_id": "strict-qc", "doc": QC_PROG_OPTIONAL},
-        ],
+        "title": "示例二：顶层 anyOf 固件（PKG-B）",
+        "story": ("v3 固件用顶层 anyOf 同时接受常规报文与风暴报文，风暴分支没有 qc 字段。"
+                  "筛查「qc=缺省 × mode=storm」时，求解器对 anyOf 各分支分别证明，"
+                  "v2 与 v3 两段均可能命中。"),
+        "doc": PACKAGE_B,
     },
     {
-        "title": "示例三：顶层 anyOf（多报文类型）",
-        "story": ("程序可声明顶层 anyOf 以同时接受多种报文形态，例如「温度报文」或「水位档位报文」。"
-                  "下面是一份接受两种形态的读取格式，可发布为第二个程序试一试。"),
-        "steps": ["把 anyOf 程序发布为 multiplexer → 与已登记固件做全量交叉检查"],
-        "snippets": [
-            {"label": "程序 multiplexer：anyOf 两种报文", "target": "program",
-             "program_id": "multiplexer", "doc": ANYOF_PROG},
-        ],
+        "title": "示例三：摘要与契约矛盾（PKG-C，待核）",
+        "story": ("整包摘要登记 2 条 storm 工况报文，但唯一段 v0 的契约里 mode 枚举只有 routine。"
+                  "没有任何固件段能产生 storm 报文，摘要与契约矛盾，整包标为待核。"),
+        "doc": PACKAGE_C_CONFLICT,
+    },
+    {
+        "title": "示例四：全部段不可能命中（PKG-D，可跳过）",
+        "story": ("单段 v1 的 qc、mode 均为必填且不接受 null。查「qc=缺省 × mode=storm」时，"
+                  "唯一固件段被 UNSAT 证明不可能命中，且整包缺省计数为 0，方可跳过该包。"),
+        "doc": PACKAGE_D_SKIP,
     },
 ]

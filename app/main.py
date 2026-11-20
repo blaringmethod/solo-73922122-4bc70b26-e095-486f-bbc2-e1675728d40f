@@ -1,4 +1,4 @@
-"""契约发布网页：FastAPI 入口（HTML 页面 + JSON API）。"""
+"""离线归档筛查网页：FastAPI 入口（HTML 页面 + JSON API）。"""
 import json
 import time
 from contextlib import asynccontextmanager
@@ -12,9 +12,9 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError, OperationalError
 
 import service
-from db import (Base, DeviceModel, FirmwareFormat, ProgramFormat, PublishLog,
+from db import (ArchivePackage, Base, DeviceModel, EnumField, FirmwareSegment,
                 SessionLocal, engine)
-from examples import EXAMPLES
+from examples import EXAMPLES, FIELDS_QC_MODE
 
 BASE_DIR = Path(__file__).resolve().parent
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
@@ -42,7 +42,7 @@ async def lifespan(app):
     yield
 
 
-app = FastAPI(title="水质平台报文契约发布", lifespan=lifespan)
+app = FastAPI(title="水质平台 · 离线归档筛查", lifespan=lifespan)
 
 
 # ---------------- 公共数据 ----------------
@@ -55,24 +55,28 @@ def _get_model_or_404(name: str) -> DeviceModel:
         return DeviceModel(id=m.id, name=m.name)
 
 
-def _model_context(name: str, result=None):
+def _model_context(name: str, error=None, notice=None, results=None, form=None):
     with SessionLocal() as s:
         model = s.execute(select(DeviceModel).where(DeviceModel.name == name)).scalar_one_or_none()
         if model is None:
             raise HTTPException(404, f"型号 {name!r} 不存在")
-        firmwares = s.execute(select(FirmwareFormat)
-                              .where(FirmwareFormat.model_id == model.id)
-                              .order_by(FirmwareFormat.version)).scalars().all()
-        programs = s.execute(select(ProgramFormat)
-                             .where(ProgramFormat.model_id == model.id)
-                             .order_by(ProgramFormat.program_id)).scalars().all()
-        logs = s.execute(select(PublishLog).where(PublishLog.model_id == model.id)
-                         .order_by(PublishLog.id.desc()).limit(50)).scalars().all()
+        fields = s.execute(select(EnumField).where(EnumField.model_id == model.id)
+                           .order_by(EnumField.id)).scalars().all()
+        pkgs = s.execute(select(ArchivePackage).where(ArchivePackage.model_id == model.id)
+                         .order_by(ArchivePackage.id)).scalars().all()
+        pkg_rows = []
+        for p in pkgs:
+            segs = s.execute(select(FirmwareSegment).where(
+                FirmwareSegment.package_id == p.id).order_by(FirmwareSegment.id)
+            ).scalars().all()
+            pkg_rows.append({"pkg": p, "segments": segs})
         s.expunge_all()
         return {
-            "model": model, "firmwares": firmwares, "programs": programs,
-            "logs": logs, "examples": EXAMPLES, "result": result,
-            "max_formats": service.MAX_FORMATS,
+            "model": model, "fields": fields, "pkg_rows": pkg_rows,
+            "examples": EXAMPLES, "error": error, "notice": notice,
+            "results": results, "form": form or {},
+            "max_segments": service.MAX_SEGMENTS,
+            "max_packages": service.MAX_PACKAGES,
         }
 
 
@@ -84,9 +88,12 @@ def index(request: Request):
         models = s.execute(select(DeviceModel).order_by(DeviceModel.name)).scalars().all()
         rows = []
         for m in models:
-            fw = s.execute(select(FirmwareFormat).where(FirmwareFormat.model_id == m.id)).scalars().all()
-            pg = s.execute(select(ProgramFormat).where(ProgramFormat.model_id == m.id)).scalars().all()
-            rows.append({"name": m.name, "fw_count": len(fw), "pg_count": len(pg)})
+            nf = s.execute(select(EnumField).where(
+                EnumField.model_id == m.id)).scalars().all()
+            np = s.execute(select(ArchivePackage).where(
+                ArchivePackage.model_id == m.id)).scalars().all()
+            rows.append({"name": m.name, "field_count": len(nf),
+                         "pkg_count": len(np)})
     return templates.TemplateResponse(request, "index.html", {"rows": rows})
 
 
@@ -96,7 +103,7 @@ def create_model(request: Request, name: str = Form(...)):
     if not service.valid_name(name):
         with SessionLocal() as s:
             models = s.execute(select(DeviceModel).order_by(DeviceModel.name)).scalars().all()
-            rows = [{"name": m.name, "fw_count": 0, "pg_count": 0} for m in models]
+            rows = [{"name": m.name, "field_count": 0, "pkg_count": 0} for m in models]
         return templates.TemplateResponse(
             request, "index.html", {"rows": rows,
                                     "error": "型号名只能由字母数字及 _ . - 组成，长度 1~64"},
@@ -114,31 +121,79 @@ def model_page(request: Request, name: str):
     return templates.TemplateResponse(request, "model.html", _model_context(name))
 
 
-@app.post("/models/{name}/firmware", response_class=HTMLResponse)
-def fw_publish_html(request: Request, name: str, schema_text: str = Form(...)):
+@app.post("/models/{name}/fields", response_class=HTMLResponse)
+def fields_html(request: Request, name: str,
+                field1_key: str = Form(...), field1_label: str = Form(""),
+                field1_values: str = Form(...),
+                field2_key: str = Form(...), field2_label: str = Form(""),
+                field2_values: str = Form(...)):
     model = _get_model_or_404(name)
+
+    def _parse_values(text: str, key: str):
+        vals = []
+        for tok in (text or "").split(","):
+            tok = tok.strip()
+            if tok == "":
+                continue
+            try:
+                vals.append(json.loads(tok))
+            except json.JSONDecodeError:
+                vals.append(tok)  # 未加引号的字符串枚举值
+        if not vals:
+            raise service.ServiceError(f"字段 {key} 至少需要一个枚举值")
+        return vals
+
     try:
-        doc = json.loads(schema_text)
-    except json.JSONDecodeError as e:
-        outcome = service.PublishOutcome(False, f"JSON 解析失败：{e}")
-    else:
-        outcome = service.publish_firmware(model.id, doc)
-    return templates.TemplateResponse(request, "model.html",
-                                      _model_context(name, result=outcome))
+        fields_in = [
+            {"field_key": field1_key.strip(), "label": field1_label.strip(),
+             "values": _parse_values(field1_values, field1_key)},
+            {"field_key": field2_key.strip(), "label": field2_label.strip(),
+             "values": _parse_values(field2_values, field2_key)},
+        ]
+        service.setup_model_fields(model.id, fields_in)
+    except service.ServiceError as e:
+        return templates.TemplateResponse(
+            request, "model.html", _model_context(name, error=f"枚举字段登记失败：{e}"),
+            status_code=400)
+    return RedirectResponse(f"/models/{name}", status_code=303)
 
 
-@app.post("/models/{name}/programs", response_class=HTMLResponse)
-def prog_publish_html(request: Request, name: str,
-                      program_id: str = Form(...), schema_text: str = Form(...)):
+@app.post("/models/{name}/packages", response_class=HTMLResponse)
+def package_html(request: Request, name: str, package_text: str = Form(...)):
     model = _get_model_or_404(name)
     try:
-        doc = json.loads(schema_text)
+        payload = json.loads(package_text)
     except json.JSONDecodeError as e:
-        outcome = service.PublishOutcome(False, f"JSON 解析失败：{e}")
-    else:
-        outcome = service.publish_program(model.id, program_id.strip(), doc)
-    return templates.TemplateResponse(request, "model.html",
-                                      _model_context(name, result=outcome))
+        return templates.TemplateResponse(
+            request, "model.html",
+            _model_context(name, error=f"包 JSON 解析失败：{e}", form={"package_text": package_text}),
+            status_code=400)
+    try:
+        pkg = service.create_package(
+            model.id, str(payload.get("package_no", "")).strip(),
+            payload.get("counts"), payload.get("note"),
+            payload.get("segments"))
+    except service.ServiceError as e:
+        return templates.TemplateResponse(
+            request, "model.html",
+            _model_context(name, error=f"归档包录入被拒：{e}", form={"package_text": package_text}),
+            status_code=400)
+    return RedirectResponse(f"/models/{name}?added={pkg.package_no}", status_code=303)
+
+
+@app.post("/models/{name}/screen", response_class=HTMLResponse)
+async def screen_html(request: Request, name: str):
+    model = _get_model_or_404(name)
+    form_data = await request.form()
+    form = {k: str(v) for k, v in form_data.items()}
+    try:
+        results, _fields = service.screen_model(model.id, form)
+    except service.ServiceError as e:
+        return templates.TemplateResponse(
+            request, "model.html", _model_context(name, error=f"筛查失败：{e}"),
+            status_code=400)
+    return templates.TemplateResponse(
+        request, "model.html", _model_context(name, results=results, form=form))
 
 
 # ---------------- JSON API ----------------
@@ -147,25 +202,33 @@ class ModelIn(BaseModel):
     name: str
 
 
-class FirmwareIn(BaseModel):
+class FieldIn(BaseModel):
+    field_key: str
+    label: str = ""
+    values: list
+
+
+class FieldsIn(BaseModel):
+    fields: list[FieldIn]
+
+
+class SegmentIn(BaseModel):
+    segment: str
+    message_count: int
+    schema_: dict = Field(alias="schema")
+
     model_config = ConfigDict(populate_by_name=True)
-    doc: dict = Field(alias="schema")
 
 
-class ProgramIn(BaseModel):
-    model_config = ConfigDict(populate_by_name=True)
-    program_id: str
-    doc: dict = Field(alias="schema")
+class PackageIn(BaseModel):
+    package_no: str
+    counts: dict
+    note: str | None = None
+    segments: list[SegmentIn]
 
 
-def _outcome_response(outcome: service.PublishOutcome, extra=None):
-    body = {"ok": outcome.ok, "message": outcome.message}
-    if outcome.problems:
-        body["problems"] = outcome.problems
-    if extra:
-        body.update(extra)
-    status = 200 if outcome.ok else (409 if outcome.problems else 422)
-    return JSONResponse(body, status_code=status)
+class ScreenIn(BaseModel):
+    query: dict
 
 
 @app.get("/api/health")
@@ -192,33 +255,78 @@ def api_create_model(body: ModelIn):
 
 @app.get("/api/models/{name}")
 def api_model_state(name: str):
-    ctx = _model_context(name)
+    with SessionLocal() as s:
+        model = s.execute(select(DeviceModel).where(DeviceModel.name == name)).scalar_one_or_none()
+        if model is None:
+            raise HTTPException(404, f"型号 {name!r} 不存在")
+        fields = s.execute(select(EnumField).where(EnumField.model_id == model.id)
+                           .order_by(EnumField.id)).scalars().all()
+        pkgs = s.execute(select(ArchivePackage).where(ArchivePackage.model_id == model.id)
+                         .order_by(ArchivePackage.id)).scalars().all()
+        out_pkgs = []
+        for p in pkgs:
+            segs = s.execute(select(FirmwareSegment).where(
+                FirmwareSegment.package_id == p.id).order_by(FirmwareSegment.id)
+            ).scalars().all()
+            out_pkgs.append({
+                "package_no": p.package_no, "note": p.note, "counts": p.counts,
+                "segments": [{"segment": g.segment, "message_count": g.message_count,
+                              "schema": g.doc} for g in segs],
+            })
+        return {
+            "name": model.name,
+            "fields": [{"field_key": f.field_key, "label": f.label,
+                        "values": f.values} for f in fields],
+            "packages": out_pkgs,
+        }
+
+
+@app.post("/api/models/{name}/fields", status_code=201)
+def api_setup_fields(name: str, body: FieldsIn):
+    model = _get_model_or_404(name)
+    try:
+        service.setup_model_fields(model.id, [f.model_dump() for f in body.fields])
+    except service.ServiceError as e:
+        raise HTTPException(422, str(e))
+    return {"ok": True}
+
+
+@app.post("/api/models/{name}/packages")
+def api_create_package(name: str, body: PackageIn):
+    model = _get_model_or_404(name)
+    segments = [{"segment": g.segment, "message_count": g.message_count,
+                 "schema": g.schema_} for g in body.segments]
+    try:
+        pkg = service.create_package(model.id, body.package_no.strip(),
+                                     body.counts, body.note, segments)
+    except service.ServiceError as e:
+        raise HTTPException(422, str(e))
+    return {"ok": True, "package_no": pkg.package_no}
+
+
+@app.post("/api/models/{name}/screen")
+def api_screen(name: str, body: ScreenIn):
+    model = _get_model_or_404(name)
+    try:
+        results, fields = service.screen_model(model.id, body.query)
+    except service.ServiceError as e:
+        raise HTTPException(422, str(e))
     return {
-        "name": ctx["model"].name,
-        "firmwares": [{"version": f.version, "schema": f.doc,
-                       "created_at": str(f.created_at)} for f in ctx["firmwares"]],
-        "programs": [{"program_id": p.program_id, "schema": p.doc,
-                      "updated_at": str(p.updated_at)} for p in ctx["programs"]],
+        "ok": True,
+        "fields": [{"field_key": f.field_key, "label": f.label} for f in fields],
+        "results": [
+            {
+                "package_no": r.package_no, "verdict": r.verdict,
+                "possible_segments": r.possible_segments,
+                "summary": r.summary, "reasons": r.reasons,
+                "segments": [{"segment": g.segment, "verdict": g.verdict,
+                              "witness": g.witness, "reasons": g.reasons}
+                             for g in r.segments],
+            } for r in results
+        ],
     }
 
 
-@app.get("/api/models/{name}/log")
-def api_model_log(name: str):
-    ctx = _model_context(name)
-    return {"logs": [{"action": l.action, "program_id": l.program_id,
-                      "result": l.result, "detail": l.detail,
-                      "created_at": str(l.created_at)} for l in ctx["logs"]]}
-
-
-@app.post("/api/models/{name}/firmware")
-def api_publish_firmware(name: str, body: FirmwareIn):
-    model = _get_model_or_404(name)
-    outcome = service.publish_firmware(model.id, body.doc)
-    return _outcome_response(outcome, {"version": outcome.version})
-
-
-@app.post("/api/models/{name}/programs")
-def api_publish_program(name: str, body: ProgramIn):
-    model = _get_model_or_404(name)
-    outcome = service.publish_program(model.id, body.program_id.strip(), body.doc)
-    return _outcome_response(outcome)
+@app.get("/api/examples")
+def api_examples():
+    return {"fields_example": FIELDS_QC_MODE, "examples": EXAMPLES}

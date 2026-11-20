@@ -3,45 +3,51 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{% block title %}水质平台 · 报文契约发布{% endblock %}</title>
+<title>{% block title %}水质平台 · 离线归档筛查{% endblock %}</title>
 <style>
-  :root { --ok:#0a7d2c; --bad:#b00020; --line:#d8dee4; --bg:#f6f8fa; }
+  :root { --ok:#0a7d2c; --bad:#b00020; --warn:#a06a00; --line:#d8dee4; --bg:#f6f8fa; }
   * { box-sizing: border-box; }
   body { font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
          margin: 0; color: #1f2328; background: var(--bg); }
   header { background: #0b3d66; color: #fff; padding: 12px 24px; }
   header a { color: #cfe8ff; text-decoration: none; }
   header .brand { font-weight: 700; font-size: 18px; }
-  main { max-width: 1080px; margin: 24px auto; padding: 0 16px 64px; }
+  main { max-width: 1120px; margin: 24px auto; padding: 0 16px 64px; }
   h1 { font-size: 22px; } h2 { font-size: 18px; border-bottom: 1px solid var(--line); padding-bottom: 6px; margin-top: 32px; }
   table { border-collapse: collapse; width: 100%; background: #fff; }
   th, td { border: 1px solid var(--line); padding: 8px 10px; text-align: left; vertical-align: top; font-size: 14px; }
   th { background: #eef2f6; }
   pre { background: #0d1117; color: #d6e2ee; padding: 10px 12px; border-radius: 6px;
         overflow: auto; font-size: 12.5px; margin: 4px 0; max-height: 320px; }
-  textarea { width: 100%; min-height: 180px; font-family: ui-monospace, Consolas, monospace;
+  textarea { width: 100%; min-height: 200px; font-family: ui-monospace, Consolas, monospace;
              font-size: 13px; padding: 8px; border: 1px solid var(--line); border-radius: 6px; }
-  input[type=text] { padding: 7px 9px; border: 1px solid var(--line); border-radius: 6px; font-size: 14px; }
+  input[type=text], select { padding: 7px 9px; border: 1px solid var(--line); border-radius: 6px; font-size: 14px; }
   button, .btn { background: #0b3d66; color: #fff; border: 0; border-radius: 6px;
                  padding: 8px 16px; font-size: 14px; cursor: pointer; }
   button:hover { background: #14508a; }
   .btn-sm { padding: 4px 10px; font-size: 13px; background: #45607a; }
   .card { background: #fff; border: 1px solid var(--line); border-radius: 8px; padding: 16px 18px; margin: 12px 0; }
   .notice-ok { border-left: 5px solid var(--ok); background: #e9f7ee; }
-  .notice-ok h3 { color: var(--ok); margin: 0 0 6px; }
   .notice-bad { border-left: 5px solid var(--bad); background: #fdeef0; }
-  .notice-bad h3 { color: var(--bad); margin: 0 0 6px; }
+  .notice-warn { border-left: 5px solid var(--warn); background: #fff7e2; }
   .muted { color: #5b6570; font-size: 13.5px; }
   .tag { display: inline-block; background: #e8eef5; border-radius: 10px; padding: 1px 9px; font-size: 12.5px; margin-right: 6px; }
   .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
   @media (max-width: 900px) { .cols { grid-template-columns: 1fr; } }
-  .cex { background: #fff8e6; border: 1px solid #ecd9a0; }
-  .err { color: var(--bad); }
+  .err { color: var(--bad); font-weight: 600; }
+  .verdict-hit { color: var(--ok); font-weight: 700; }
+  .verdict-skip { color: #5b6570; font-weight: 700; }
+  .verdict-review { color: var(--warn); font-weight: 700; }
+  .seg-yes { border-left: 4px solid var(--ok); }
+  .seg-no { border-left: 4px solid #9aa6b2; }
+  .seg-unknown { border-left: 4px solid var(--warn); }
+  .state-missing { font-style: italic; color: #6a42b8; }
+  .state-null { color: #b05a00; font-weight: 600; }
 </style>
 </head>
 <body>
 <header>
-  <span class="brand">水质平台 · 报文契约发布</span>
+  <span class="brand">水质平台 · 离线归档筛查</span>
   &nbsp;<a href="/">型号列表</a>
 </header>
 <main>

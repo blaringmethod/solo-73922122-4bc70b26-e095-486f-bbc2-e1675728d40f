@@ -1,114 +1,182 @@
 {% extends "base.html" %}
-{% block title %}型号 {{ model.name }} · 契约管理{% endblock %}
+{% block title %}型号 {{ model.name }} · 离线归档筛查{% endblock %}
 {% block content %}
 <h1>型号 <span class="tag">{{ model.name }}</span></h1>
-<p class="muted">固件格式只追加；程序格式按程序号替换。发布即触发全量兼容检查（z3 证明，非抽样），失败不改动任何已发布格式。</p>
 
-{% if result %}
-  {% if result.ok %}
-  <div class="card notice-ok"><h3>✔ 发布成功</h3>{{ result.message }}</div>
-  {% else %}
-  <div class="card notice-bad">
-    <h3>✘ 发布被拒绝</h3>
-    <p>{{ result.message }}</p>
-    {% if result.problems %}
-      <p><b>拒绝依据（不兼容组合与反例报文）：</b></p>
-      {% for p in result.problems %}
-      <div class="card cex">
-        固件写入格式 <b>v{{ p.firmware_version }}</b> 允许的报文被程序
-        <b>「{{ p.program_id }}」</b>拒收，反例报文：
-        <pre>{{ p.counterexample | tojson }}</pre>
-      </div>
-      {% endfor %}
-    {% endif %}
-  </div>
-  {% endif %}
-{% endif %}
+{% if error %}<div class="card notice-bad"><h3 style="margin:0">✘ {{ error }}</h3></div>{% endif %}
 
-<div class="cols">
-  <div>
-    <h2>历代固件写入格式（{{ firmwares | length }} / {{ max_formats }}，只追加）</h2>
-    {% for f in firmwares %}
-    <div class="card">
-      <b>v{{ f.version }}</b> <span class="muted">{{ f.created_at }}</span>
-      <pre>{{ f.doc | tojson }}</pre>
+{# ---------- 1. 枚举字段登记 ---------- #}
+{% if not fields %}
+<h2>第一步：登记两个枚举字段</h2>
+<p class="muted">每个字段给出报文字段名、展示名与枚举值清单（逗号分隔，字符串可不带引号）。
+字段缺省 <code>missing</code> 与显式 <code>null</code> 是两个独立隐式状态，无需列入清单，计数时自动分开。</p>
+<form method="post" action="/models/{{ model.name }}/fields" class="card">
+  <div class="cols">
+    <div>
+      <h3 style="margin-top:0">字段一（如质控码）</h3>
+      <p>字段名 <input type="text" name="field1_key" value="qc" required pattern="[A-Za-z0-9][A-Za-z0-9_.\-]{0,63}"></p>
+      <p>展示名 <input type="text" name="field1_label" value="质控码"></p>
+      <p>枚举值（逗号分隔）<br><input type="text" name="field1_values" value='N, Q' style="width:100%"></p>
     </div>
-    {% else %}<p class="muted">尚未登记固件格式。</p>{% endfor %}
-  </div>
-  <div>
-    <h2>现用程序读取格式（{{ programs | length }} / {{ max_formats }}，按程序号替换）</h2>
-    {% for p in programs %}
-    <div class="card">
-      <b>{{ p.program_id }}</b> <span class="muted">{{ p.updated_at }}</span>
-      <pre>{{ p.doc | tojson }}</pre>
+    <div>
+      <h3 style="margin-top:0">字段二（如工况）</h3>
+      <p>字段名 <input type="text" name="field2_key" value="mode" required pattern="[A-Za-z0-9][A-Za-z0-9_.\-]{0,63}"></p>
+      <p>展示名 <input type="text" name="field2_label" value="工况"></p>
+      <p>枚举值（逗号分隔）<br><input type="text" name="field2_values" value='routine, storm' style="width:100%"></p>
     </div>
-    {% else %}<p class="muted">尚未登记程序格式。</p>{% endfor %}
   </div>
-</div>
+  <button type="submit">登记枚举字段</button>
+</form>
+{% else %}
+<h2>枚举字段（{{ fields | length }} / 2）</h2>
+<table>
+  <tr><th>报文字段名</th><th>展示名</th><th>枚举值</th><th>隐式状态（分开计数）</th></tr>
+  {% for f in fields %}
+  <tr>
+    <td><b>{{ f.field_key }}</b></td>
+    <td>{{ f.label }}</td>
+    <td>{% for v in f.values %}<span class="tag">{{ v }}</span>{% endfor %}</td>
+    <td><span class="tag state-missing">missing（缺省）</span><span class="tag state-null">null（显式空值）</span></td>
+  </tr>
+  {% endfor %}
+</table>
 
-<h2>发布新格式</h2>
-<div class="cols">
-  <div class="card">
-    <h3 style="margin-top:0">追加固件写入格式（v{{ (firmwares | length) + 1 }}）</h3>
-    <form method="post" action="/models/{{ model.name }}/firmware">
-      <textarea id="fw_schema" name="schema_text" placeholder='{"type":"object","properties":{...},"required":[...],"additionalProperties":false}'></textarea>
-      <button type="submit">校验并发布固件格式</button>
-    </form>
-  </div>
-  <div class="card">
-    <h3 style="margin-top:0">发布 / 替换程序读取格式</h3>
-    <form method="post" action="/models/{{ model.name }}/programs">
-      <p>程序号：<input type="text" id="prog_id" name="program_id" required
-         pattern="[A-Za-z0-9][A-Za-z0-9_.\-]{0,63}" placeholder="如 analyzer"></p>
-      <textarea id="prog_schema" name="schema_text" placeholder='{"type":"object","properties":{...},"required":[...],"additionalProperties":false}'></textarea>
-      <button type="submit">校验并发布程序格式</button>
-    </form>
-  </div>
-</div>
+{# ---------- 2. 归档包录入 ---------- #}
+<h2>录入离线归档包（{{ pkg_rows | length }} / {{ max_packages }}）</h2>
+<p class="muted">每包至多 {{ max_segments }} 个固件段。包 JSON 含：包号 <code>package_no</code>、
+整包计数 <code>counts</code>（每个字段给出各状态条数，缺省用 <code>missing</code>、显式空值用 <code>null</code>，
+枚举值状态键形如 <code>value:"N"</code> / <code>value:3</code>）、
+固件段 <code>segments</code>（段名、报文条数 <code>message_count</code>、受限 JSON Schema 契约，支持顶层 anyOf）。
+各字段状态条数之和必须等于各段报文条数之和。</p>
+<form method="post" action="/models/{{ model.name }}/packages" class="card">
+  <textarea id="package_text" name="package_text" placeholder='{"package_no":"PKG-A","counts":{...},"segments":[...]}'
+            style="min-height:240px">{{ form.package_text or '' }}</textarea>
+  <p><button type="submit">校验并录入归档包</button></p>
+</form>
 
-<h2>示例（点击填入编辑器）</h2>
+<h3>示例（点击填入）</h3>
 {% for ex in examples %}
 <div class="card">
   <b>{{ ex.title }}</b>
   <p class="muted">{{ ex.story }}</p>
-  <p class="muted">操作步骤：{{ ex.steps | join(" → ") }}</p>
-  {% for s in ex.snippets %}
-  <button type="button" class="btn-sm" onclick="fillSnippet(this)"
-          data-target="{{ s.target }}" data-prog="{{ s.program_id or '' }}"
-          data-doc='{{ s.doc | tojsonc }}'>填入：{{ s.label }}</button>
-  {% endfor %}
+  <button type="button" class="btn-sm" onclick="fillPackage(this)"
+          data-doc='{{ ex.doc | tojsonc }}'>填入：{{ ex.doc.package_no }}</button>
 </div>
 {% endfor %}
 
-<h2>发布日志（最近 50 条，含拒绝依据）</h2>
-<table>
-  <tr><th>时间</th><th>动作</th><th>结果</th><th>详情</th></tr>
-  {% for l in logs %}
-  <tr>
-    <td class="muted">{{ l.created_at }}</td>
-    <td>{{ "固件" if l.action == "firmware" else "程序" }}{% if l.program_id %}「{{ l.program_id }}」{% endif %}</td>
-    <td>{% if l.result == "published" %}<span style="color:var(--ok)">已发布</span>
-        {% elif l.result == "rejected" %}<span style="color:var(--bad)">已拒绝</span>
-        {% else %}<span class="err">无效</span>{% endif %}</td>
-    <td>{% if l.detail %}<pre>{{ l.detail | tojson }}</pre>{% endif %}</td>
-  </tr>
-  {% else %}
-  <tr><td colspan="4" class="muted">暂无日志。</td></tr>
-  {% endfor %}
-</table>
+{# ---------- 3. 已录入包 ---------- #}
+<h2>已录入归档包</h2>
+{% for row in pkg_rows %}
+<div class="card">
+  <h3 style="margin-top:0">包 <span class="tag">{{ row.pkg.package_no }}</span>
+    <span class="muted">{{ row.pkg.note or '' }}</span></h3>
+  <p class="muted">整包状态计数（缺省 / 显式 null 分开）：</p>
+  <table>
+    <tr><th>字段</th>{% for f in fields %}<th>{{ f.label }}（{{ f.field_key }}）</th>{% endfor %}</tr>
+    {% for f in fields %}
+    <tr>
+      <td><b>{{ f.field_key }}</b></td>
+      <td colspan="{{ fields | length }}">
+        {% for st, n in row.pkg.counts[f.field_key].items() %}
+          <span class="tag {% if st == 'missing' %}state-missing{% elif st == 'null' %}state-null{% endif %}">{{ st }} = {{ n }}</span>
+        {% endfor %}
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+  <p class="muted" style="margin-bottom:4px">固件段（{{ row.segments | length }}）：</p>
+  <table>
+    <tr><th>固件段</th><th>报文条数</th><th>固件契约</th></tr>
+    {% for g in row.segments %}
+    <tr>
+      <td><b>{{ g.segment }}</b></td>
+      <td>{{ g.message_count }}</td>
+      <td><pre>{{ g.doc | tojson }}</pre></td>
+    </tr>
+    {% endfor %}
+  </table>
+</div>
+{% else %}
+<p class="muted">暂无归档包。</p>
+{% endfor %}
+
+{# ---------- 4. 筛查 ---------- #}
+<h2>双字段联合筛查</h2>
+<p class="muted">为两个枚举字段各选一个待查状态，系统列出每个包中哪些固件段
+<b>可能存在同时命中两个状态的报文</b>。判定基于 z3 对契约的可满足性证明（不按报文条数展开），
+并联合整包计数：全部段都不可能命中才跳过；摘要与契约矛盾或无法判定标为待核。</p>
+<form method="post" action="/models/{{ model.name }}/screen" class="card">
+  <div class="cols">
+    {% for f in fields %}
+    <div>
+      <h3 style="margin-top:0">{{ f.label }}（{{ f.field_key }}）待查状态</h3>
+      <select name="{{ f.field_key }}" style="width:100%">
+        <option value="missing" {% if form.get(f.field_key)=='missing' %}selected{% endif %}>missing（字段缺省）</option>
+        <option value="null" {% if form.get(f.field_key)=='null' %}selected{% endif %}>null（显式空值）</option>
+        {% for v in f.values %}
+        {% set st = 'value:' ~ (v | tojsonc) %}
+        <option value="{{ st }}" {% if form.get(f.field_key)==st %}selected{% endif %}>值 = {{ v }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    {% endfor %}
+  </div>
+  <p><button type="submit">执行筛查</button></p>
+</form>
+
+{% if results %}
+<h2>筛查结果</h2>
+{% for r in results %}
+<div class="card">
+  <h3 style="margin-top:0">包 <span class="tag">{{ r.package_no }}</span>
+    {% if r.verdict == 'hit' %}<span class="verdict-hit">命中候选 · 保留</span>
+    {% elif r.verdict == 'skip' %}<span class="verdict-skip">可跳过</span>
+    {% else %}<span class="verdict-review">待核</span>{% endif %}
+  </h3>
+  <p class="muted">整包计数核对：
+    {% for fk, info in r.summary.items() %}
+      <span class="tag {% if info.state == 'missing' %}state-missing{% elif info.state == 'null' %}state-null{% endif %}">
+        {{ fk }} {{ info.state }} = {{ info.count }}</span>
+    {% endfor %}
+  </p>
+  <table>
+    <tr><th>固件段</th><th>契约判定</th><th>依据 / 见证报文</th></tr>
+    {% for g in r.segments %}
+    <tr class="seg-{{ g.verdict }}">
+      <td><b>{{ g.segment }}</b></td>
+      <td>
+        {% if g.verdict == 'yes' %}<span class="verdict-hit">可能命中</span>
+        {% elif g.verdict == 'no' %}<span class="verdict-skip">不可能命中（UNSAT 证明）</span>
+        {% else %}<span class="verdict-review">无法判定</span>{% endif %}
+      </td>
+      <td>
+        {% for why in g.reasons %}<div class="muted">{{ why }}</div>{% endfor %}
+        {% if g.witness %}<pre>{{ g.witness | tojson }}</pre>{% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+  <p class="muted" style="margin-bottom:0">
+    结论依据：
+    <ul style="margin:6px 0 0">
+      {% for why in r.reasons %}<li>{{ why }}</li>{% endfor %}
+    </ul>
+    {% if r.possible_segments %}可能命中的固件段：
+      <b>{% for s in r.possible_segments %}{{ s }} {% endfor %}</b>{% endif %}
+  </p>
+</div>
+{% else %}
+<p class="muted">暂无归档包，可先录入示例包再筛查。</p>
+{% endfor %}
+{% endif %}
+{% endif %}
+{% endblock %}
 
 <script>
-function fillSnippet(btn) {
-  const target = btn.dataset.target;
+function fillPackage(btn) {
   const doc = JSON.parse(btn.dataset.doc);
-  if (target === 'firmware') {
-    document.getElementById('fw_schema').value = JSON.stringify(doc, null, 2);
-    document.getElementById('fw_schema').scrollIntoView({behavior: 'smooth'});
-  } else {
-    document.getElementById('prog_id').value = btn.dataset.prog || '';
-    document.getElementById('prog_schema').value = JSON.stringify(doc, null, 2);
-    document.getElementById('prog_schema').scrollIntoView({behavior: 'smooth'});
-  }
+  const ta = document.getElementById('package_text');
+  ta.value = JSON.stringify(doc, null, 2);
+  ta.scrollIntoView({behavior: 'smooth'});
 }
 </script>
-{% endblock %}

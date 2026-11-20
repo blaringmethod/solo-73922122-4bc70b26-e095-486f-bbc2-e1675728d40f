@@ -6,6 +6,11 @@
 - 整数上下界：{"type": "integer", "minimum": m, "maximum": M}（上下界均可省略）
 - 字符串/整数/空值枚举：{"enum": [...]}（可配 "type" 进一步限定）
 - 空值类型：{"type": "null"}
+
+字段三态（筛查状态）：
+- missing      字段缺省（报文不含该字段）
+- null         字段显式取值 null
+- value:<值>   字段取某个具体枚举值（字符串/整数）
 """
 from __future__ import annotations
 
@@ -18,9 +23,46 @@ MAX_ENUM_VALUES = 256
 MAX_STRING_LEN = 128
 INT_BOUND = 2**53
 
+# 字段状态键
+MISSING = "missing"
+NULL = "null"
+VALUE_PREFIX = "value:"
+
 
 class SchemaError(ValueError):
     """报文格式不符合受限语法。"""
+
+
+def value_state(value) -> str:
+    """具体枚举值 -> 状态键 value:<json 值>。"""
+    if value is None:
+        return NULL
+    if isinstance(value, bool):  # 受限语法本就拒绝布尔，防御一下
+        raise SchemaError("枚举值不允许布尔")
+    if isinstance(value, int):
+        return f"{VALUE_PREFIX}{value}"
+    if isinstance(value, str):
+        return f'{VALUE_PREFIX}"{value}"'
+    raise SchemaError("枚举值只允许字符串/整数/null")
+
+
+def parse_state(state: str):
+    """状态键 -> (kind, value)；kind 为 missing / null / value。"""
+    if state == MISSING:
+        return MISSING, None
+    if state == NULL:
+        return NULL, None
+    if state.startswith(VALUE_PREFIX):
+        token = state[len(VALUE_PREFIX):]
+        if token.startswith('"'):
+            if not token.endswith('"') or len(token) < 2:
+                raise SchemaError(f"非法状态键 {state!r}")
+            return "value", token[1:-1]
+        try:
+            return "value", int(token)
+        except ValueError:
+            raise SchemaError(f"非法状态键 {state!r}")
+    raise SchemaError(f"非法状态键 {state!r}")
 
 
 @dataclass
@@ -31,6 +73,37 @@ class FieldSpec:
     int_hi: Optional[int] = None
     int_set: Optional[frozenset] = None
     str_set: Optional[frozenset] = None
+
+    def allows_value(self, v) -> bool:
+        """该字段定义是否接受某个具体值。"""
+        if v is None:
+            return self.allow_null
+        if isinstance(v, bool):
+            return False
+        if isinstance(v, int):
+            if self.int_kind == "range":
+                if self.int_lo is not None and v < self.int_lo:
+                    return False
+                if self.int_hi is not None and v > self.int_hi:
+                    return False
+                return True
+            if self.int_kind == "set":
+                return v in self.int_set
+            return False
+        if isinstance(v, str):
+            return self.str_set is not None and v in self.str_set
+        return False
+
+    def enum_values(self) -> list:
+        """字段允许的离散枚举值（整数集合/字符串集合/可空）；范围字段返回空列表。"""
+        vals = []
+        if self.int_set:
+            vals.extend(sorted(self.int_set))
+        if self.str_set:
+            vals.extend(sorted(self.str_set))
+        if self.allow_null:
+            vals.append(None)
+        return vals
 
 
 @dataclass
@@ -133,7 +206,7 @@ def parse_branch(doc, where: str) -> Branch:
     if doc.get("type") != "object":
         raise SchemaError(f'{where}: type 必须为 "object"')
     if doc.get("additionalProperties") is not False:
-        raise SchemaError(f"{where}: 必须显式声明 \"additionalProperties\": false")
+        raise SchemaError(f'{where}: 必须显式声明 "additionalProperties": false')
     props = doc.get("properties")
     if not isinstance(props, dict):
         raise SchemaError(f"{where}: 缺少 properties 对象")
@@ -171,7 +244,7 @@ def parse_schema(doc) -> Schema:
     return Schema(branches=(parse_branch(doc, "顶层"),))
 
 
-# ---------- 纯 Python 报文判定（用于复核 z3 给出的反例） ----------
+# ---------- 纯 Python 报文判定 ----------
 
 def message_valid(msg, schema: Schema) -> bool:
     if not isinstance(msg, dict):
@@ -205,4 +278,17 @@ def _field_valid(v, spec: FieldSpec) -> bool:
         return False
     if isinstance(v, str):
         return spec.str_set is not None and v in spec.str_set
+    return False
+
+
+def message_has_state(msg: dict, field_name: str, kind: str, value=None) -> bool:
+    """报文在某字段上是否呈现指定状态（missing / null / value）。"""
+    if kind == MISSING:
+        return field_name not in msg
+    if field_name not in msg:
+        return False
+    if kind == NULL:
+        return msg[field_name] is None
+    if kind == "value":
+        return msg[field_name] == value
     return False

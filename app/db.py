@@ -6,7 +6,7 @@ from sqlalchemy import (Column, DateTime, ForeignKey, Integer, String,
 from sqlalchemy.orm import declarative_base, sessionmaker
 from sqlalchemy.types import JSON
 
-DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite:///./contracts.db")
+DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite:///./archive.db")
 
 _connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
 engine = create_engine(DATABASE_URL, pool_pre_ping=True, connect_args=_connect_args)
@@ -26,43 +26,52 @@ if DATABASE_URL.startswith("sqlite"):
 
 
 class DeviceModel(Base):
+    """设备型号：每个型号登记两个枚举字段及若干离线归档包。"""
     __tablename__ = "device_models"
     id = Column(Integer, primary_key=True)
     name = Column(String(64), unique=True, nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 
-class FirmwareFormat(Base):
-    """历代固件写入格式：只追加，每型号至多 8 份。"""
-    __tablename__ = "firmware_formats"
+class EnumField(Base):
+    """枚举字段（如质控码 qc、工况 mode）。每型号固定登记两个。
+
+    values 为离散枚举值清单（字符串/整数）；缺省 missing 与显式 null 是两个
+    独立的隐式状态，不放进 values，计数时分开统计。
+    """
+    __tablename__ = "enum_fields"
     id = Column(Integer, primary_key=True)
     model_id = Column(Integer, ForeignKey("device_models.id"), nullable=False, index=True)
-    version = Column(Integer, nullable=False)
-    doc = Column("schema", JsonDoc, nullable=False)
+    field_key = Column(String(64), nullable=False)          # 报文中的字段名，如 qc
+    label = Column(String(128), nullable=False)             # 展示名，如 质控码
+    values = Column(JsonDoc, nullable=False)                # ["N", "Q", ...]
     created_at = Column(DateTime(timezone=True), server_default=func.now())
-    __table_args__ = (UniqueConstraint("model_id", "version"),)
+    __table_args__ = (UniqueConstraint("model_id", "field_key"),)
 
 
-class ProgramFormat(Base):
-    """现用程序读取格式：按程序号替换，每型号至多 8 个程序。"""
-    __tablename__ = "program_formats"
+class ArchivePackage(Base):
+    """离线归档包：整包在两个枚举字段上各状态的报文条数（摘要计数）。
+
+    counts 结构：{field_key: {"missing": n0, "null": n1, "value:<v>": n, ...}}
+    缺省与显式 null 分开计数；未出现的状态键按 0 处理。
+    """
+    __tablename__ = "archive_packages"
     id = Column(Integer, primary_key=True)
     model_id = Column(Integer, ForeignKey("device_models.id"), nullable=False, index=True)
-    program_id = Column(String(64), nullable=False)
-    doc = Column("schema", JsonDoc, nullable=False)
-    updated_at = Column(DateTime(timezone=True), server_default=func.now(),
-                        onupdate=func.now())
-    __table_args__ = (UniqueConstraint("model_id", "program_id"),)
-
-
-class PublishLog(Base):
-    """发布日志：成功/拒绝/无效均留痕，拒绝时保存反例等依据。"""
-    __tablename__ = "publish_log"
-    id = Column(Integer, primary_key=True)
-    model_id = Column(Integer, ForeignKey("device_models.id"), nullable=False, index=True)
-    action = Column(String(16), nullable=False)      # firmware | program
-    program_id = Column(String(64), nullable=True)
-    doc = Column("schema", JsonDoc, nullable=False)
-    result = Column(String(16), nullable=False)      # published | rejected | invalid
-    detail = Column(JsonDoc, nullable=True)
+    package_no = Column(String(64), nullable=False)
+    counts = Column(JsonDoc, nullable=False)
+    note = Column(String(256), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+    __table_args__ = (UniqueConstraint("model_id", "package_no"),)
+
+
+class FirmwareSegment(Base):
+    """包内固件段：某已发布固件版本的报文条数与该版本的固件契约（受限 schema）。"""
+    __tablename__ = "firmware_segments"
+    id = Column(Integer, primary_key=True)
+    package_id = Column(Integer, ForeignKey("archive_packages.id"), nullable=False, index=True)
+    segment = Column(String(64), nullable=False)            # 固件版本/段名，如 v1
+    message_count = Column(Integer, nullable=False)         # 该段报文条数
+    doc = Column("schema", JsonDoc, nullable=False)         # 固件契约 schema
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    __table_args__ = (UniqueConstraint("package_id", "segment"),)
